@@ -114,7 +114,7 @@ legend{color:var(--hi);padding:0 6px;white-space:nowrap;overflow:hidden;max-widt
       <li>Oben ein <b>neues Projekt</b> anlegen (Name egal, z.B. „VIDEO“) und auswählen.</li>
       <li><b>YouTube Data API v3</b> → <b>Aktivieren</b>.</li>
       <li>Links <b>Anmeldedaten</b> (Credentials) → <b>Anmeldedaten erstellen</b> → <b>API-Schlüssel</b>.</li>
-      <li>Empfohlen: Schlüssel bearbeiten → <b>Websites</b> einschränken auf<br><code id="refUrl"></code><br>und bei API-Einschränkungen nur <b>YouTube Data API v3</b> erlauben.</li>
+      <li>Empfohlen: Schlüssel bearbeiten → <b>Websites</b> → zwei Einträge hinzufügen:<br><code id="refUrl"></code><br><code id="refUrl2"></code><br>und bei API-Einschränkungen nur <b>YouTube Data API v3</b> erlauben.</li>
       <li>Schlüssel kopieren und hier einfügen:</li>
     </ol>
     <input id="keyIn" placeholder="AIza…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -175,9 +175,11 @@ function quota(add) { const today = new Date().toISOString().slice(0, 10); let q
   $('title').textContent = 'VIDEO.EXE · ' + q.u + '/10000'; }
 
 /* ---------- API ---------- */
-async function api(path, params, cost) {
+async function api(path, params, cost, auth) {
   const p = new URLSearchParams(Object.assign({key: KEY}, params));
-  const r = await fetch(API + path + '?' + p.toString());
+  if (auth && !gValid()) { const e = new Error('Google-Anmeldung abgelaufen'); e.expired = true; throw e; }
+  const r = await fetch(API + path + '?' + p.toString(), auth ? {headers: {Authorization: 'Bearer ' + gtok.a}} : undefined);
+  if (auth && r.status === 401) { gtok = null; lset('gtok', null); const e = new Error('Google-Anmeldung abgelaufen'); e.expired = true; throw e; }
   quota(cost || 1);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { const e = j.error || {}; const reason = e.errors && e.errors[0] && e.errors[0].reason;
@@ -216,7 +218,7 @@ function vRow(v, list, idx) {
 }
 function chRow(c) {
   const r = el('div', 'item'); const th = el('div', 'th round'); const im = el('img'); im.alt = ''; if (c.thumb) im.src = c.thumb; th.appendChild(im);
-  const tx = el('div', 'txt'); tx.append(el('div', 't', c.title), el('div', 'sub', subs.some(s => s.id === c.id) ? '★ abonniert' : 'Kanal'));
+  const tx = el('div', 'txt'); tx.append(el('div', 't', c.title), el('div', 'sub', (gSubs || []).some(s => s.id === c.id) ? '★ YouTube-Abo' : subs.some(s => s.id === c.id) ? '★ lokal abonniert' : 'Kanal'));
   r.append(th, tx); r.onclick = () => { stack.push(renderCurrent); openChannel(c); }; L().appendChild(r);
 }
 function plRow(p) {
@@ -292,22 +294,40 @@ function drawTrends(from) { if (!from) { clear(); drawChips(); } tState.items.sl
 
 // Abos (lokal gespeicherte Kanäle)
 let feedCache = null;
+let gSubs = null;
+function allSubs() { const m = new Map(); (gSubs || []).forEach(c => m.set(c.id, c)); subs.forEach(c => { if (!m.has(c.id)) m.set(c.id, c); }); return [...m.values()]; }
 async function viewSubs() {
   legend('ABOS'); clear(); renderCurrent = viewSubs;
-  if (!subs.length) { msg('Noch keine Abos.\n\nSuche einen Kanal (Suche → Kanäle) oder tippe in einem Video auf den Kanalnamen und dann auf ★ ABONNIEREN.\n\nDeine Abos werden nur auf diesem Gerät gespeichert.'); return; }
+  if (gValid() && !gSubs) {
+    const wait = msg('Lade deine YouTube-Abos…');
+    try { let token = null; const out = [];
+      do { const q = {part: 'snippet', mine: 'true', maxResults: 50, order: 'relevance'}; if (token) q.pageToken = token;
+        const j = await api('subscriptions', q, 1, true);
+        (j.items || []).forEach(it => out.push({id: it.snippet.resourceId.channelId, title: deco(it.snippet.title), thumb: thumb(it.snippet), g: true}));
+        token = j.nextPageToken; } while (token && out.length < 250);
+      gSubs = out; feedCache = null; wait.remove();
+    } catch (e) { wait.remove(); gLoginBox(e); }
+    if (tab !== 'ab' || stack.length) return;
+    return viewSubs();
+  }
+  if (!gValid()) gLoginBox();
+  const list = allSubs();
+  if (!list.length) { msg('Noch keine Abos.\n\nMit Google angemeldet erscheinen hier deine YouTube-Abos. Zusätzlich kannst du Kanäle lokal mit ★ ABONNIEREN speichern.'); return; }
   const top = el('div'); top.style.padding = '2px 4px';
   const fb = el('button', 'btn g', '▶ NEUESTE VIDEOS'); fb.onclick = () => { stack.push(viewSubs); viewFeed(); };
-  top.appendChild(fb); L().appendChild(top);
-  sec('KANÄLE (' + subs.length + ')');
-  subs.slice().sort((a, b) => a.title.localeCompare(b.title)).forEach(chRow);
+  top.appendChild(fb);
+  if (gSubs) { const rb = el('button', 'btn', '↻'); rb.onclick = () => { gSubs = null; viewSubs(); }; top.appendChild(rb); }
+  L().appendChild(top);
+  sec('KANÄLE (' + list.length + ')');
+  list.slice().sort((a, b) => a.title.localeCompare(b.title)).forEach(chRow);
 }
 async function viewFeed() {
   legend('NEU VON DEINEN ABOS'); clear(); L().appendChild(backBtn());
   if (feedCache && Date.now() - feedCache.at < 15 * 60 * 1000) return drawFeed();
-  const wait = msg('Lade ' + subs.length + ' Kanäle…');
+  const fsubs = allSubs(); const wait = msg('Lade ' + Math.min(40, fsubs.length) + ' Kanäle…');
   try {
     const all = [];
-    await Promise.all(subs.slice(0, 40).map(async s => { try { const j = await api('playlistItems', {part: 'snippet,contentDetails', playlistId: 'UU' + s.id.slice(2), maxResults: 6});
+    await Promise.all(fsubs.slice(0, 40).map(async s => { try { const j = await api('playlistItems', {part: 'snippet,contentDetails', playlistId: 'UU' + s.id.slice(2), maxResults: 6});
       (j.items || []).forEach(it => { const v = vidFrom(it); v.date = (it.contentDetails && it.contentDetails.videoPublishedAt) || v.date; if (v.title !== 'Private video' && v.title !== 'Deleted video') all.push(v); }); } catch (e) {} }));
     all.sort((a, b) => new Date(b.date) - new Date(a.date));
     const top = all.slice(0, 50); await enrich(top);
@@ -321,9 +341,10 @@ function viewLists() {
   legend('LISTEN'); clear(); renderCurrent = viewLists;
   const c = el('div', 'chips');
   const sub = lget('listTab', 'saved');
-  [['saved', '★ Merkliste (' + saved.length + ')'], ['queue', '≡ Warteschlange (' + queue.length + ')'], ['hist', '◷ Verlauf (' + hist.length + ')']].forEach(([v, t]) => {
+  [['mypl', '▶ Meine Playlists'], ['liked', '♥ Mag ich'], ['saved', '★ Merkliste (' + saved.length + ')'], ['queue', '≡ Warteschlange (' + queue.length + ')'], ['hist', '◷ Verlauf (' + hist.length + ')']].forEach(([v, t]) => {
     const b = el('button', 'chip' + (sub === v ? ' on' : ''), t); b.onclick = () => { lset('listTab', v); viewLists(); }; c.appendChild(b); });
   L().appendChild(c);
+  if (sub === 'mypl' || sub === 'liked') return viewGoogleList(sub);
   const arr = sub === 'saved' ? saved : sub === 'queue' ? queue : hist;
   if (!arr.length) { msg({saved: 'Merkliste ist leer. Im Video auf ★ MERKEN tippen.', queue: 'Warteschlange ist leer. Tippe bei Videos auf +.', hist: 'Noch nichts angesehen.'}[sub]); return; }
   const bar = el('div'); bar.style.padding = '0 4px 4px';
@@ -456,8 +477,57 @@ async function openWatch(v) {
   } catch (e) { desc.textContent = 'Details nicht ladbar: ' + e.message; }
 }
 
+
+/* ---------- Google-Anmeldung (OAuth, ohne Server) ---------- */
+const GSCOPE = 'https://www.googleapis.com/auth/youtube.readonly';
+const REDIR = location.origin + location.pathname.replace(/index\.html$/, '');
+let CID = lget('cid', null), gtok = lget('gtok', null);
+function gValid() { return !!(gtok && gtok.a && Date.now() < gtok.e); }
+function gLogin(silent) {
+  if (!CID) { toast('Zuerst unter ⚙ die Client-ID eintragen.'); openTab('st'); return; }
+  const st = Math.random().toString(36).slice(2) + (silent ? '.s' : ''); lset('gstate', st); lset('gret', tab);
+  const p = new URLSearchParams({client_id: CID, redirect_uri: REDIR, response_type: 'token', scope: GSCOPE, include_granted_scopes: 'true', state: st});
+  if (silent) p.set('prompt', 'none');
+  location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + p.toString();
+}
+function handleGoogleReturn() {
+  const h = location.hash; if (!/access_token=|error=/.test(h)) return;
+  const q = new URLSearchParams(h.slice(1)); history.replaceState(null, '', location.pathname);
+  const silent = (q.get('state') || '').endsWith('.s');
+  if (q.get('access_token')) { gtok = {a: q.get('access_token'), e: Date.now() + (parseInt(q.get('expires_in') || '3600', 10) - 60) * 1000}; lset('gtok', gtok); lset('gwas', true);
+    setTimeout(() => { toast('Mit Google angemeldet.', true); const t = lget('gret', 'ab'); openTab(t === 'st' ? 'ab' : t); }, 50); }
+  else if (silent) gLogin(false);
+  else setTimeout(() => toast('Google-Anmeldung nicht möglich: ' + q.get('error')), 50);
+}
+function gLoginBox(err) {
+  const box = el('div', 'msg');
+  if (err && !err.expired) { box.className = 'msg e'; box.textContent = 'Google-Fehler: ' + err.message + (/channel/i.test(err.message) ? '\n(Dein Google-Konto braucht einen YouTube-Kanal.)' : ''); L().appendChild(box); return; }
+  if (lget('gwas', false) && CID) { box.textContent = 'Google-Sitzung abgelaufen (gilt je 1 Stunde).'; const b = el('button', 'btn g', '↻ ERNEUERN'); b.onclick = () => gLogin(true); box.appendChild(el('br')); box.appendChild(b); }
+  else { box.textContent = 'Melde dich mit Google an, um deine echten YouTube-Abos, Playlists und „Mag ich“-Videos zu sehen.'; const b = el('button', 'btn y', CID ? 'MIT GOOGLE ANMELDEN' : 'EINRICHTEN (⚙)'); b.onclick = () => CID ? gLogin() : openTab('st'); box.appendChild(el('br')); box.appendChild(b); }
+  L().appendChild(box);
+}
+async function viewGoogleList(kind) {
+  if (!gValid()) { gLoginBox(); return; }
+  const wait = msg('Lade…');
+  try {
+    if (kind === 'mypl') {
+      const j = await api('playlists', {part: 'snippet,contentDetails', mine: 'true', maxResults: 50}, 1, true); wait.remove();
+      const items = j.items || []; if (!items.length) msg('Keine eigenen Playlists.');
+      items.forEach(it => plRow({id: it.id, title: deco(it.snippet.title) + '  (' + it.contentDetails.itemCount + ')', ch: deco(it.snippet.channelTitle), thumb: thumb(it.snippet)}));
+    } else {
+      const all = []; let token = null;
+      const load = async () => { const q = {part: 'snippet,contentDetails,statistics', myRating: 'like', maxResults: 50}; if (token) q.pageToken = token;
+        const j = await api('videos', q, 1, true); wait.remove(); const vs = (j.items || []).map(vidFrom); const from = all.length; all.push(...vs);
+        if (!all.length) msg('Noch keine Videos mit „Mag ich“.');
+        vs.forEach((v, i) => vRow(v, all, from + i)); token = j.nextPageToken; if (token) moreBtn(load); };
+      await load();
+    }
+  } catch (e) { wait.remove(); gLoginBox(e); }
+}
+
 /* ---------- Einrichtung & Start ---------- */
-$('refUrl').textContent = location.origin + location.pathname.replace(/index\.html$/, '') + '*';
+$('refUrl').textContent = location.origin + '/*';
+$('refUrl2').textContent = location.origin + '/';
 $('keySave').onclick = async () => {
   const k = $('keyIn').value.trim(); if (!/^AIza[\w-]{30,}$/.test(k)) { $('setupMsg').className = 'msg e'; $('setupMsg').textContent = 'Das sieht nicht nach einem API-Schlüssel aus (beginnt mit „AIza“).'; return; }
   KEY = k; $('setupMsg').className = 'msg'; $('setupMsg').textContent = 'Prüfe…';
@@ -471,7 +541,15 @@ function viewSettings() { clear(); legend('EINSTELLUNGEN'); renderCurrent = view
   const p = el('button', 'btn', pixel ? 'VORSCHAUBILDER: PIXELIG' : 'VORSCHAUBILDER: SCHARF'); p.style.marginLeft = '4px';
   p.onclick = () => { pixel = !pixel; lset('pixel', pixel); p.textContent = pixel ? 'VORSCHAUBILDER: PIXELIG' : 'VORSCHAUBILDER: SCHARF'; tState.at = 0; };
   const k = el('button', 'btn r', 'API-SCHLÜSSEL ÄNDERN'); k.onclick = () => { stopPlayer(); $('main').classList.add('hidden'); $('setup').classList.remove('hidden'); $('keyIn').value = KEY || ''; };
-  L().append(p, k); }
+  L().append(p, k);
+  sec('GOOGLE-KONTO (für echte Abos & Playlists)');
+  const ci = el('input'); ci.placeholder = 'OAuth-Client-ID (…apps.googleusercontent.com)'; ci.value = CID || ''; ci.setAttribute('autocapitalize', 'off'); ci.setAttribute('autocorrect', 'off'); ci.spellcheck = false;
+  ci.style.cssText = 'width:calc(100% - 8px);margin:4px;font:inherit;font-size:18px;background:#000;color:#fff;border:0;padding:6px 8px;border-radius:0';
+  const lg = el('button', 'btn g', gValid() ? '✓ ANGEMELDET – NEU ANMELDEN' : 'MIT GOOGLE ANMELDEN'); lg.style.marginLeft = '4px';
+  lg.onclick = () => { const v = ci.value.trim(); if (!/\.apps\.googleusercontent\.com$/.test(v)) { toast('Client-ID muss auf .apps.googleusercontent.com enden.'); return; } CID = v; lset('cid', v); gLogin(); };
+  const lo = el('button', 'btn r', 'ABMELDEN'); lo.onclick = () => { gtok = null; gSubs = null; lset('gtok', null); lset('gwas', false); toast('Abgemeldet.', true); viewSettings(); };
+  L().append(ci, lg, lo, el('div', 'msg', 'Weiterleitungs-URI für Google Cloud:\n' + REDIR + '\nJavaScript-Quelle:\n' + location.origin)); }
+handleGoogleReturn();
 if (KEY) start(); else $('setup').classList.remove('hidden');
 </script>
 <script>
